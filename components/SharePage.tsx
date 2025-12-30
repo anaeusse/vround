@@ -18,6 +18,11 @@ const SharePage: React.FC = () => {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const handleClose = () => {
+    // Return to viewer and persist state
+    navigate('/viewer', { state: { customImage: previewImage, locationName: locationName } });
+  };
+
   return (
     <div className="bg-background-dark min-h-screen flex flex-col text-white font-display">
       {/* Top Navigation */}
@@ -26,7 +31,7 @@ const SharePage: React.FC = () => {
         <h2 className="text-xl font-bold tracking-tight">Share Experience</h2>
         <div className="flex w-10 items-center justify-end">
           <button 
-            onClick={() => navigate('/viewer')}
+            onClick={handleClose}
             className="flex h-10 w-10 items-center justify-center rounded-full bg-white/5 text-white hover:bg-white/10 transition"
           >
             <span className="material-symbols-outlined text-sm">close</span>
@@ -42,12 +47,12 @@ const SharePage: React.FC = () => {
             <div className="flex flex-col justify-center gap-2 flex-1">
               <div className="flex items-center gap-3">
                 <span className="inline-flex items-center gap-1.5 rounded-full bg-primary/20 px-3 py-1 text-[10px] font-bold text-primary uppercase tracking-wider">
-                  Live
+                  360°
                 </span>
-                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">360° Capture</span>
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Capture Preview</span>
               </div>
-              <p className="text-2xl font-bold leading-tight text-white tracking-tight">{locationName}</p>
-              <p className="text-xs text-slate-500 font-medium">Capture updated now</p>
+              <p className="text-2xl font-bold leading-tight text-white tracking-tight line-clamp-2">{locationName}</p>
+              <p className="text-xs text-slate-500 font-medium">Ready to explore</p>
             </div>
             <div 
               className="w-28 bg-center bg-no-repeat bg-cover rounded-2xl aspect-square shadow-inner relative overflow-hidden shrink-0 border border-white/10" 

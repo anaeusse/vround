@@ -2,43 +2,18 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import * as THREE from 'three';
-import { GoogleGenAI, Modality, LiveServerMessage } from "@google/genai";
 import { getLocationFacts } from '../services/geminiService';
 import { LocationInfo } from '../types';
-
-// Helper for Base64 and Audio
-const decode = (base64: string) => {
-  const binaryString = atob(base64);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-  return bytes;
-};
-
-const encode = (bytes: Uint8Array) => {
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary);
-};
-
-async function decodeAudioData(data: Uint8Array, ctx: AudioContext, sampleRate: number, numChannels: number): Promise<AudioBuffer> {
-  const dataInt16 = new Int16Array(data.buffer);
-  const frameCount = dataInt16.length / numChannels;
-  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
-  for (let channel = 0; channel < numChannels; channel++) {
-    const channelData = buffer.getChannelData(channel);
-    for (let i = 0; i < frameCount; i++) channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
-  }
-  return buffer;
-}
 
 const ViewerPage: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const [showControls, setShowControls] = useState(true);
+  const [showControls, setShowControls] = useState(false);
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [aiInfo, setAiInfo] = useState<LocationInfo | null>(null);
   const [aiSources, setAiSources] = useState<any[]>([]);
   const [showAiModal, setShowAiModal] = useState(false);
+  const [viewMode, setViewMode] = useState<'spherical' | 'tiny-planet'>('spherical');
   
   // Custom image from state
   const customImage = location.state?.customImage;
@@ -62,16 +37,12 @@ const ViewerPage: React.FC = () => {
   const lat = useRef(0);
   const onPointerDownLon = useRef(0);
   const onPointerDownLat = useRef(0);
-  const phi = useRef(0);
-  const theta = useRef(0);
-
-  // Voice Assistant State
-  const [isAssistantActive, setIsAssistantActive] = useState(false);
-  const [assistantTranscribing, setAssistantTranscribing] = useState(false);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const sessionRef = useRef<any>(null);
-  const nextStartTimeRef = useRef(0);
-  const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const pointerStartTime = useRef(0);
+  const totalPointerDist = useRef(0);
+  
+  // Animation/Smoothing state
+  const targetFov = useRef(75);
+  const targetLat = useRef(0);
 
   // Initialize Three.js Scene
   useEffect(() => {
@@ -115,22 +86,31 @@ const ViewerPage: React.FC = () => {
       if (!rendererRef.current || !sceneRef.current || !cameraRef.current) return;
       requestAnimationFrame(animate);
 
-      // Auto rotation if not interacting
+      // Smooth transition for Tiny Planet
+      const lerpFactor = 0.05;
+      cameraRef.current.fov += (targetFov.current - cameraRef.current.fov) * lerpFactor;
+      cameraRef.current.updateProjectionMatrix();
+
+      if (viewMode === 'tiny-planet' && !isPointerDown.current) {
+        lat.current += (targetLat.current - lat.current) * lerpFactor;
+      }
+
+      // Auto-rotation when idle
       if (!isPointerDown.current) {
-        lon.current += 0.05;
+        lon.current += (viewMode === 'tiny-planet' ? 0.1 : 0.05);
       }
 
       lat.current = Math.max(-85, Math.min(85, lat.current));
-      phi.current = THREE.MathUtils.degToRad(90 - lat.current);
-      theta.current = THREE.MathUtils.degToRad(lon.current);
+      const phi = THREE.MathUtils.degToRad(90 - lat.current);
+      const theta = THREE.MathUtils.degToRad(lon.current);
 
-      cameraRef.current.target = new THREE.Vector3(
-        500 * Math.sin(phi.current) * Math.cos(theta.current),
-        500 * Math.cos(phi.current),
-        500 * Math.sin(phi.current) * Math.sin(theta.current)
+      const target = new THREE.Vector3(
+        500 * Math.sin(phi) * Math.cos(theta),
+        500 * Math.cos(phi),
+        500 * Math.sin(phi) * Math.sin(theta)
       );
 
-      cameraRef.current.lookAt(cameraRef.current.target);
+      cameraRef.current.lookAt(target);
       rendererRef.current.render(sceneRef.current, cameraRef.current);
     };
 
@@ -146,26 +126,54 @@ const ViewerPage: React.FC = () => {
     };
   }, [customImage, defaultBg]);
 
-  // Pointer Handlers for Interaction
+  // Update projection targets when mode changes
+  useEffect(() => {
+    if (viewMode === 'tiny-planet') {
+      targetFov.current = 140;
+      targetLat.current = -85;
+    } else {
+      targetFov.current = 75;
+      targetLat.current = 0;
+      lat.current = 0; // Quick reset for better feel
+    }
+  }, [viewMode]);
+
   const handlePointerDown = (e: React.PointerEvent) => {
     isPointerDown.current = true;
     pointerX.current = e.clientX;
     pointerY.current = e.clientY;
     onPointerDownLon.current = lon.current;
     onPointerDownLat.current = lat.current;
+    pointerStartTime.current = Date.now();
+    totalPointerDist.current = 0;
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
     if (!isPointerDown.current) return;
-    lon.current = (pointerX.current - e.clientX) * 0.1 + onPointerDownLon.current;
-    lat.current = (e.clientY - pointerY.current) * 0.1 + onPointerDownLat.current;
+    const dx = e.clientX - pointerX.current;
+    const dy = e.clientY - pointerY.current;
+    totalPointerDist.current += Math.sqrt(dx * dx + dy * dy);
+    
+    const factor = viewMode === 'tiny-planet' ? 0.3 : 0.15;
+    lon.current = (pointerX.current - e.clientX) * factor + onPointerDownLon.current;
+    lat.current = (e.clientY - pointerY.current) * factor + onPointerDownLat.current;
   };
 
   const handlePointerUp = () => {
+    if (!isPointerDown.current) return;
     isPointerDown.current = false;
+
+    // Detect click (short duration, small distance)
+    const duration = Date.now() - pointerStartTime.current;
+    if (duration < 300 && totalPointerDist.current < 10) {
+      setShowControls(prev => !prev);
+    }
   };
 
-  const toggleControls = () => setShowControls(prev => !prev);
+  const toggleViewMode = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setViewMode(prev => prev === 'spherical' ? 'tiny-planet' : 'spherical');
+  };
 
   const fetchAiData = useCallback(async () => {
     setIsAiLoading(true);
@@ -184,92 +192,9 @@ const ViewerPage: React.FC = () => {
     setShowAiModal(true);
   };
 
-  const startAssistant = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (isAssistantActive) {
-      stopAssistant();
-      return;
-    }
-
-    try {
-      setIsAssistantActive(true);
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
-      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      audioContextRef.current = outputCtx;
-
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      
-      const sessionPromise = ai.live.connect({
-        model: 'gemini-2.5-flash-native-audio-preview-09-2025',
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } } },
-          systemInstruction: `You are an immersive experience guide. The user is currently viewing ${customImage ? `their own uploaded 360 degree photo titled "${customName}"` : 'Mount Everest Base Camp'}. Provide insights, facts, or helpful spatial descriptions. Be enthusiastic and professional.`,
-        },
-        callbacks: {
-          onopen: () => {
-            const source = inputCtx.createMediaStreamSource(stream);
-            const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
-            scriptProcessor.onaudioprocess = (e) => {
-              const inputData = e.inputBuffer.getChannelData(0);
-              const int16 = new Int16Array(inputData.length);
-              for (let i = 0; i < inputData.length; i++) int16[i] = inputData[i] * 32768;
-              const pcmBlob = { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=16000' };
-              sessionPromise.then(s => s.sendRealtimeInput({ media: pcmBlob }));
-            };
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(inputCtx.destination);
-          },
-          onmessage: async (message: LiveServerMessage) => {
-            const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
-            if (base64Audio) {
-              setAssistantTranscribing(true);
-              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, outputCtx.currentTime);
-              const buffer = await decodeAudioData(decode(base64Audio), outputCtx, 24000, 1);
-              const source = outputCtx.createBufferSource();
-              source.buffer = buffer;
-              source.connect(outputCtx.destination);
-              source.addEventListener('ended', () => {
-                sourcesRef.current.delete(source);
-                if (sourcesRef.current.size === 0) setAssistantTranscribing(false);
-              });
-              source.start(nextStartTimeRef.current);
-              nextStartTimeRef.current += buffer.duration;
-              sourcesRef.current.add(source);
-            }
-            if (message.serverContent?.interrupted) {
-              sourcesRef.current.forEach(s => s.stop());
-              sourcesRef.current.clear();
-            }
-          }
-        }
-      });
-      sessionRef.current = await sessionPromise;
-    } catch (err) {
-      console.error("Live assistant error:", err);
-      setIsAssistantActive(false);
-    }
-  };
-
-  const stopAssistant = () => {
-    setIsAssistantActive(false);
-    setAssistantTranscribing(false);
-    if (sessionRef.current) {
-      sessionRef.current.close();
-      sessionRef.current = null;
-    }
-    sourcesRef.current.forEach(s => s.stop());
-    sourcesRef.current.clear();
-  };
-
-  useEffect(() => {
-    return () => stopAssistant();
-  }, []);
-
   return (
     <div className="relative w-full h-full bg-black overflow-hidden select-none">
-      {/* 360 Content Layer - WebGL View */}
+      {/* 360 WebGL Container */}
       <div 
         ref={containerRef}
         className="absolute inset-0 z-0 cursor-grab active:cursor-grabbing"
@@ -278,37 +203,16 @@ const ViewerPage: React.FC = () => {
         onPointerUp={handlePointerUp}
         onPointerLeave={handlePointerUp}
       >
-        <div className={`absolute inset-0 bg-black/40 pointer-events-none transition-opacity duration-700 ${showControls || isAssistantActive ? 'opacity-100' : 'opacity-0'}`}></div>
+        <div className={`absolute inset-0 bg-black/30 pointer-events-none transition-opacity duration-700 ${showControls ? 'opacity-100' : 'opacity-0'}`}></div>
       </div>
 
-      {/* Voice Assistant Overlay */}
-      {isAssistantActive && (
-        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center pointer-events-none">
-          <div className="flex items-center gap-1 h-12">
-            {[...Array(8)].map((_, i) => (
-              <div 
-                key={i} 
-                className={`w-1.5 bg-primary rounded-full transition-all duration-200 ${assistantTranscribing ? 'animate-pulse' : 'h-2'}`}
-                style={{ 
-                  height: assistantTranscribing ? `${Math.random() * 40 + 10}px` : '4px',
-                  animationDelay: `${i * 0.1}s`
-                }}
-              ></div>
-            ))}
-          </div>
-          <p className="mt-6 text-white text-sm font-bold uppercase tracking-[0.3em] opacity-80">
-            {assistantTranscribing ? 'Assistant is speaking...' : 'Listening to your guide...'}
-          </p>
-        </div>
-      )}
-
       {/* HUD Layer */}
-      <div className={`absolute inset-0 z-20 flex flex-col justify-between pointer-events-none transition-all duration-500 ease-out ${showControls ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'}`}>
+      <div className={`absolute inset-0 z-40 flex flex-col justify-between pointer-events-none transition-all duration-500 ease-out ${showControls ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'}`}>
         
         {/* Top Header */}
         <div className="w-full p-6 pt-12 flex items-start justify-between pointer-events-auto">
           <button 
-            onClick={() => navigate('/')}
+            onClick={(e) => { e.stopPropagation(); navigate('/'); }}
             className="flex items-center justify-center size-12 rounded-full bg-background-dark/40 backdrop-blur-xl border border-white/10 text-white hover:bg-background-dark/80 transition shadow-2xl"
           >
             <span className="material-symbols-outlined">arrow_back</span>
@@ -316,10 +220,11 @@ const ViewerPage: React.FC = () => {
           
           <div className="flex gap-4">
             <button 
-              onClick={startAssistant}
-              className={`flex items-center justify-center size-12 rounded-full transition-all active:scale-90 border shadow-2xl ${isAssistantActive ? 'bg-primary border-primary text-white scale-110' : 'bg-background-dark/40 backdrop-blur-xl border-white/10 text-white hover:bg-background-dark/80'}`}
+              onClick={toggleViewMode}
+              className="flex items-center justify-center size-12 rounded-full bg-background-dark/40 backdrop-blur-xl border border-white/10 text-white hover:bg-background-dark/80 transition-all shadow-2xl active:scale-90"
+              title={viewMode === 'spherical' ? "Tiny Planet View" : "Spherical View"}
             >
-              <span className="material-symbols-outlined">{isAssistantActive ? 'mic' : 'mic_none'}</span>
+              <span className="material-symbols-outlined">{viewMode === 'spherical' ? 'brightness_7' : 'language'}</span>
             </button>
             <button className="flex items-center justify-center size-12 rounded-full bg-background-dark/40 backdrop-blur-xl border border-white/10 text-white hover:bg-background-dark/80 transition shadow-2xl">
               <span className="material-symbols-outlined">settings_suggest</span>
@@ -334,49 +239,47 @@ const ViewerPage: React.FC = () => {
               <div className="flex gap-3">
                 <div className="flex h-7 items-center justify-center gap-x-2 rounded-full bg-primary/20 border border-primary/30 px-3 backdrop-blur-xl">
                   <div className="size-2 rounded-full bg-primary animate-pulse"></div>
-                  <p className="text-primary text-[10px] font-bold uppercase tracking-widest">{customImage ? 'Custom View' : 'Guide Active'}</p>
+                  <p className="text-primary text-[10px] font-bold uppercase tracking-widest">
+                    {viewMode === 'tiny-planet' ? 'Tiny Planet Mode' : (customImage ? 'Custom View' : 'Spherical View')}
+                  </p>
                 </div>
               </div>
               <h1 className="text-white text-4xl font-bold leading-tight tracking-tight drop-shadow-2xl">{customImage ? customName : 'Mount Everest Base Camp'}</h1>
               <div className="flex items-center gap-2 text-slate-300 text-sm font-medium">
                 <span className="material-symbols-outlined text-[18px] text-primary">location_on</span>
-                <span>{customImage ? 'Uploaded Content' : 'Khumjung, Nepal • 5,364m'}</span>
+                <span>{customImage ? 'User Upload' : 'Khumjung, Nepal • 5,364m'}</span>
               </div>
             </div>
 
             <div className="flex flex-col gap-4 shrink-0">
               <button 
                 onClick={handleInfoClick}
-                className={`flex size-14 items-center justify-center rounded-full ${isAiLoading ? 'bg-primary animate-pulse' : 'bg-background-dark/50'} backdrop-blur-2xl border border-white/10 shadow-2xl text-white transition-all`}
+                className={`flex size-14 items-center justify-center rounded-full ${isAiLoading ? 'bg-primary animate-pulse' : 'bg-background-dark/50'} backdrop-blur-2xl border border-white/10 shadow-2xl text-white transition-all hover:scale-105 active:scale-95`}
               >
                 <span className="material-symbols-outlined text-[28px]">info</span>
               </button>
               <button 
-                onClick={() => navigate('/share', { state: { previewImage: customImage || defaultBg, locationName: customImage ? customName : 'Mount Everest Base Camp' } })}
-                className="flex size-14 items-center justify-center rounded-full bg-primary backdrop-blur-xl border-2 border-primary/50 shadow-[0_0_30px_rgba(25,127,230,0.4)] text-white hover:scale-110 transition-all active:scale-90"
+                onClick={(e) => { e.stopPropagation(); navigate('/share', { state: { previewImage: customImage || defaultBg, locationName: customImage ? customName : 'Mount Everest Base Camp' } }); }}
+                className="flex size-14 items-center justify-center rounded-full bg-primary backdrop-blur-xl border-2 border-primary/50 shadow-[0_0_30px_rgba(25,127,230,0.4)] text-white hover:scale-110 transition-all active:scale-95"
               >
                 <span className="material-symbols-outlined text-[32px]">ios_share</span>
               </button>
             </div>
           </div>
 
-          {/* Timeline */}
           <div className="w-full flex items-center gap-4 group/timeline">
-            <span className="text-[11px] font-mono text-white/50 w-10">Live</span>
+            <span className="text-[11px] font-mono text-white/50 w-10">360°</span>
             <div className="relative flex-1 h-1 bg-white/10 rounded-full overflow-hidden">
-               <div className="h-full bg-primary rounded-full" style={{ width: '100%' }}></div>
+               <div className="h-full bg-primary rounded-full transition-all duration-300" style={{ width: viewMode === 'tiny-planet' ? '100%' : '50%' }}></div>
             </div>
-            <span className="material-symbols-outlined text-white/50 text-xs">timer</span>
+            <span className="material-symbols-outlined text-white/50 text-xs">explore</span>
           </div>
         </div>
       </div>
 
-      {/* Tap Trigger */}
-      {!isAssistantActive && <div className="absolute inset-0 z-10 pointer-events-none" onClick={toggleControls}></div>}
-
       {/* AI Location Info Modal */}
       {showAiModal && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center p-6 backdrop-blur-md bg-black/60" onClick={() => setShowAiModal(false)}>
+        <div className="absolute inset-0 z-[60] flex items-center justify-center p-6 backdrop-blur-md bg-black/60" onClick={() => setShowAiModal(false)}>
           <div 
             className="w-full max-w-lg bg-card-dark border border-white/10 rounded-3xl overflow-hidden shadow-2xl"
             onClick={(e) => e.stopPropagation()}
@@ -384,22 +287,23 @@ const ViewerPage: React.FC = () => {
             <div className="h-32 bg-primary relative">
               <div className="absolute inset-0 bg-gradient-to-br from-black/40 to-transparent"></div>
               <div className="absolute bottom-4 left-6">
-                <span className="px-2 py-0.5 bg-white/20 backdrop-blur text-white text-[9px] font-bold uppercase rounded">Grounding Analysis</span>
+                <span className="px-2 py-0.5 bg-white/20 backdrop-blur text-white text-[9px] font-bold uppercase rounded">Location Intelligence</span>
                 <h3 className="text-2xl font-bold text-white mt-1">{aiInfo?.name || "Analyzing..."}</h3>
               </div>
             </div>
             <div className="p-8 max-h-[60vh] overflow-y-auto no-scrollbar">
               {isAiLoading ? (
-                <div className="space-y-4">
+                <div className="space-y-4 py-8">
                   <div className="h-4 bg-white/5 animate-pulse rounded w-full"></div>
                   <div className="h-4 bg-white/5 animate-pulse rounded w-3/4"></div>
+                  <div className="h-4 bg-white/5 animate-pulse rounded w-5/6"></div>
                 </div>
               ) : (
                 <div className="space-y-6">
                   <p className="text-slate-300 leading-relaxed text-sm">{aiInfo?.description}</p>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="bg-white/5 p-4 rounded-2xl border border-white/5">
-                      <p className="text-[10px] text-slate-500 uppercase font-bold mb-1">Elevation / Context</p>
+                      <p className="text-[10px] text-slate-500 uppercase font-bold mb-1">Elevation / Info</p>
                       <p className="text-white text-lg font-bold truncate">{aiInfo?.elevation}</p>
                     </div>
                     <div className="bg-white/5 p-4 rounded-2xl border border-white/5">
@@ -408,17 +312,17 @@ const ViewerPage: React.FC = () => {
                     </div>
                   </div>
                   <div className="space-y-4">
-                    <h4 className="text-xs font-bold text-primary uppercase tracking-widest">AI Observations</h4>
+                    <h4 className="text-xs font-bold text-primary uppercase tracking-widest">Observations</h4>
                     {aiInfo?.facts.map((fact, idx) => (
                       <div key={idx} className="flex gap-3">
                         <span className="material-symbols-outlined text-primary text-sm">explore</span>
-                        <p className="text-slate-400 text-sm">{fact}</p>
+                        <p className="text-slate-400 text-sm leading-snug">{fact}</p>
                       </div>
                     ))}
                   </div>
                   {aiSources.length > 0 && (
                     <div className="pt-6 border-t border-white/5">
-                      <p className="text-[10px] text-slate-600 font-bold uppercase mb-3">Grounding Sources</p>
+                      <p className="text-[10px] text-slate-600 font-bold uppercase mb-3">Context Grounding</p>
                       <div className="flex flex-wrap gap-2">
                         {aiSources.map((chunk, i) => chunk.web && (
                           <a key={i} href={chunk.web.uri} target="_blank" rel="noreferrer" className="text-[10px] text-primary hover:underline truncate max-w-full">

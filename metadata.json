@@ -2,7 +2,6 @@
   "name": "VRound - Immersive 360",
   "description": "An AI-enhanced immersive 360-degree experience viewer with touch-free navigation and location insights powered by Gemini.",
   "requestFramePermissions": [
-    "camera",
-    "microphone"
+    "camera"
   ]
 }
