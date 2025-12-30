@@ -28,7 +28,7 @@ const HomePage: React.FC = () => {
       <div className="absolute inset-0 z-0 overflow-hidden">
         <div 
           className="h-full w-full bg-cover bg-center bg-no-repeat transition-transform duration-[20s] ease-linear scale-110 pano-bg" 
-          style={{ backgroundImage: "url('https://drive.google.com/file/d/1zT882-NZscAL8ntPfk_2q8COOcooVZ3z/view')" }}
+          style={{ backgroundImage: "url('https://lh3.googleusercontent.com/aida-public/AB6AXuB9kYJEf7lq0cBOOzDqUVi36N3Y9zh02wCStlKXdNokvE3woPJqw4OydOX9sZHmZwHHobUmj4S9pEvqqzXnSGpTYpRGvU5uFDOVn19bYGpsXQ8XZwCrOd52Maky4bhzSeydNt3B8FC9M-J4AiGDfczhcBynHnUwH9XPNyp-jG9r1uCCJLFu0PjwJJ4MZQIZN8xjcrk6ST2_Dx6l7xfJxdS3rRkPUmMGzIEQQboVNFyTfjJAHm7XZ1yeMCS5YOE3qsUaaT4xuTILKavY')" }}
         >
         </div>
         {/* Gradient Overlay */}
