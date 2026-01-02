@@ -2,9 +2,9 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { LocationInfo } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY || '' });
 
-export const getLocationFacts = async (locationName: string): Promise<{info: LocationInfo, sources: any[]} | null> => {
+export const getLocationFacts = async (locationName: string): Promise<{ info: LocationInfo, sources: any[] } | null> => {
   try {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
@@ -33,7 +33,7 @@ export const getLocationFacts = async (locationName: string): Promise<{info: Loc
 
     const text = response.text;
     const sources = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-    
+
     if (!text) return null;
     return {
       info: JSON.parse(text) as LocationInfo,
